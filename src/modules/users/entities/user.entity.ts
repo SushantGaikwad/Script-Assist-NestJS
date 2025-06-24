@@ -1,9 +1,18 @@
-import { Column, CreateDateColumn, Entity, OneToMany, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  OneToMany,
+  PrimaryGeneratedColumn,
+  UpdateDateColumn,
+} from 'typeorm';
 import { Task } from '../../tasks/entities/task.entity';
 import { Exclude } from 'class-transformer';
 import { UserRole } from '../../../common/enums/user-role.enum';
 
 @Entity('users')
+@Index(['email'], { unique: true })
 export class User {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -25,12 +34,15 @@ export class User {
   })
   role: UserRole;
 
-  @OneToMany(() => Task, (task) => task.user)
+  @OneToMany(() => Task, task => task.user)
   tasks: Task[];
+
+  @Column({ default: 1 })
+  tokenVersion: number;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
   @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
-} 
+}

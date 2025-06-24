@@ -37,6 +37,10 @@ export class CustomThrottlerGuard extends ThrottlerGuard {
       return 'users';
     }
 
+    if (route.includes('/tasks/')) {
+      return 'tasls';
+    }
+
     return 'default';
   }
 

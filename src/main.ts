@@ -123,28 +123,6 @@ async function bootstrap() {
 
     const port = configService.get('PORT') || 3000;
 
-    //  Graceful shutdown handling
-    process.on('SIGTERM', async () => {
-      logger.log('SIGTERM received, starting graceful shutdown...');
-      await gracefulShutdown(app);
-    });
-
-    process.on('SIGINT', async () => {
-      logger.log('SIGINT received, starting graceful shutdown...');
-      await gracefulShutdown(app);
-    });
-
-    //  Unhandled rejection/exception handling
-    process.on('unhandledRejection', (reason, promise) => {
-      logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
-      process.exit(1);
-    });
-
-    process.on('uncaughtException', error => {
-      logger.error('Uncaught Exception:', error);
-      process.exit(1);
-    });
-
     await app.listen(port);
 
     logger.log(`🚀 Application running on: http://localhost:${port}`);
@@ -152,24 +130,6 @@ async function bootstrap() {
     logger.log(`🔍 Health check: http://localhost:${port}/health`);
   } catch (error) {
     logger.error('Error starting application:', error);
-    process.exit(1);
-  }
-}
-
-async function gracefulShutdown(app: any) {
-  const logger = new Logger('Shutdown');
-
-  try {
-    logger.log('Closing HTTP server...');
-    await app.close();
-
-    logger.log('Disconnecting from database...');
-    // Database connections will be closed by NestJS
-
-    logger.log('Graceful shutdown completed');
-    process.exit(0);
-  } catch (error) {
-    logger.error('Error during graceful shutdown:', error);
     process.exit(1);
   }
 }
