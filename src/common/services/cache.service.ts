@@ -1,99 +1,174 @@
-import { Injectable } from '@nestjs/common';
-
-// Inefficient in-memory cache implementation with multiple problems:
-// 1. No distributed cache support (fails in multi-instance deployments)
-// 2. No memory limits or LRU eviction policy
-// 3. No automatic key expiration cleanup (memory leak)
-// 4. No serialization/deserialization handling for complex objects
-// 5. No namespacing to prevent key collisions
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import Redis from 'ioredis';
+import { v4 as uuidv4 } from 'uuid';
 
 @Injectable()
-export class CacheService {
-  // Using a simple object as cache storage
-  // Problem: Unbounded memory growth with no eviction
-  private cache: Record<string, { value: any; expiresAt: number }> = {};
+export class CacheService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(CacheService.name);
+  private readonly redis: Redis;
+  private readonly namespace: string;
+  private readonly defaultTTL: number;
+  private readonly maxMemory: string;
 
-  // Inefficient set operation with no validation
-  async set(key: string, value: any, ttlSeconds = 300): Promise<void> {
-    // Problem: No key validation or sanitization
-    // Problem: Directly stores references without cloning (potential memory issues)
-    // Problem: No error handling for invalid values
-    
-    const expiresAt = Date.now() + ttlSeconds * 1000;
-    
-    // Problem: No namespacing for keys
-    this.cache[key] = {
-      value,
-      expiresAt,
-    };
-    
-    // Problem: No logging or monitoring of cache usage
+  constructor(private configService: ConfigService) {
+    this.namespace = this.configService.get<string>('CACHE_NAMESPACE', 'app') + ':';
+    this.defaultTTL = this.configService.get<number>('CACHE_DEFAULT_TTL', 300);
+    this.maxMemory = this.configService.get<string>('CACHE_MAX_MEMORY', '100mb');
+
+    this.redis = new Redis({
+      host: this.configService.get<string>('REDIS_HOST', 'localhost'),
+      port: this.configService.get<number>('REDIS_PORT', 6379),
+      password: this.configService.get<string>('REDIS_PASSWORD'),
+      maxRetriesPerRequest: 3,
+      retryStrategy: (times) => Math.min(times * 100, 2000),
+    });
+
+    this.redis.on('error', (error) => {
+      this.logger.error(`Redis error: ${error.message}`);
+    });
   }
 
-  // Inefficient get operation that doesn't handle errors properly
+  async onModuleInit() {
+    // Configure Redis with LRU eviction policy
+    await this.redis.config('SET', 'maxmemory', this.maxMemory);
+    await this.redis.config('SET', 'maxmemory-policy', 'allkeys-lru');
+    this.logger.log('Cache service initialized with Redis');
+  }
+
+  async onModuleDestroy() {
+    await this.redis.quit();
+    this.logger.log('Cache service shut down');
+  }
+
+  private getNamespacedKey(key: string): string {
+    if (!key || typeof key !== 'string') {
+      throw new Error('Invalid cache key');
+    }
+    return `${this.namespace}${key}`;
+  }
+
+  private serialize(value: unknown): string {
+    try {
+      return JSON.stringify(value);
+    } catch (error: any) {
+      this.logger.error(`Serialization error: ${error.message}`);
+      throw new Error('Failed to serialize cache value');
+    }
+  }
+
+  private deserialize<T>(value: string): T {
+    try {
+      return JSON.parse(value) as T;
+    } catch (error: any) {
+      this.logger.error(`Deserialization error: ${error.message}`);
+      throw new Error('Failed to deserialize cache value');
+    }
+  }
+
+  async set<T>(key: string, value: T, ttlSeconds: number = this.defaultTTL): Promise<void> {
+    const start = Date.now();
+    try {
+      const namespacedKey = this.getNamespacedKey(key);
+      const serializedValue = this.serialize(value);
+      await this.redis.set(namespacedKey, serializedValue, 'EX', ttlSeconds);
+      this.logger.debug(`Cache set: ${key}, duration: ${Date.now() - start}ms`);
+    } catch (error: any) {
+      this.logger.error(`Cache set error for key ${key}: ${error.message}`);
+      throw error;
+    }
+  }
+
   async get<T>(key: string): Promise<T | null> {
-    // Problem: No key validation
-    const item = this.cache[key];
-    
-    if (!item) {
+    const start = Date.now();
+    try {
+      const namespacedKey = this.getNamespacedKey(key);
+      const value = await this.redis.get(namespacedKey);
+      
+      if (value === null) {
+        this.logger.debug(`Cache miss: ${key}, duration: ${Date.now() - start}ms`);
+        return null;
+      }
+
+      const deserializedValue = this.deserialize<T>(value);
+      this.logger.debug(`Cache hit: ${key}, duration: ${Date.now() - start}ms`);
+      return deserializedValue;
+    } catch (error: any) {
+      this.logger.error(`Cache get error for key ${key}: ${error.message}`);
       return null;
     }
-    
-    // Problem: Checking expiration on every get (performance issue)
-    // Rather than having a background job to clean up expired items
-    if (item.expiresAt < Date.now()) {
-      // Problem: Inefficient immediate deletion during read operations
-      delete this.cache[key];
-      return null;
-    }
-    
-    // Problem: Returns direct object reference rather than cloning
-    // This can lead to unintended cache modifications when the returned
-    // object is modified by the caller
-    return item.value as T;
   }
 
-  // Inefficient delete operation
   async delete(key: string): Promise<boolean> {
-    // Problem: No validation or error handling
-    const exists = key in this.cache;
-    
-    // Problem: No logging of cache misses for monitoring
-    if (exists) {
-      delete this.cache[key];
-      return true;
+    try {
+      const namespacedKey = this.getNamespacedKey(key);
+      const result = await this.redis.del(namespacedKey);
+      return result > 0;
+    } catch (error: any) {
+      this.logger.error(`Cache delete error for key ${key}: ${error.message}`);
+      return false;
     }
-    
-    return false;
   }
 
-  // Inefficient cache clearing
   async clear(): Promise<void> {
-    // Problem: Blocking operation that can cause performance issues
-    // on large caches
-    this.cache = {};
-    
-    // Problem: No notification or events when cache is cleared
+    try {
+      const keys = await this.redis.keys(`${this.namespace}*`);
+      if (keys.length > 0) {
+        await this.redis.del(keys);
+      }
+      this.logger.log('Cache cleared');
+    } catch (error: any) {
+      this.logger.error(`Cache clear error: ${error.message}`);
+      throw error;
+    }
   }
 
-  // Inefficient method to check if a key exists
-  // Problem: Duplicates logic from the get method
   async has(key: string): Promise<boolean> {
-    const item = this.cache[key];
-    
-    if (!item) {
+    try {
+      const namespacedKey = this.getNamespacedKey(key);
+      const exists = await this.redis.exists(namespacedKey);
+      return exists > 0;
+    } catch (error: any) {
+      this.logger.error(`Cache has error for key ${key}: ${error.message}`);
       return false;
     }
-    
-    // Problem: Repeating expiration logic instead of having a shared helper
-    if (item.expiresAt < Date.now()) {
-      delete this.cache[key];
-      return false;
-    }
-    
-    return true;
   }
-  
-  // Problem: Missing methods for bulk operations and cache statistics
-  // Problem: No monitoring or instrumentation
-} 
+
+  async getStats(): Promise<{
+    memoryUsage: number;
+    cacheHits: number;
+    cacheMisses: number;
+    totalKeys: number;
+  }> {
+    try {
+      const [info, totalKeys] = await Promise.all([
+        this.redis.info('MEMORY'),
+        this.redis.dbsize(),
+      ]);
+      
+      const memoryMatch = info.match(/used_memory:(\d+)/);
+      const memoryUsage = memoryMatch ? parseInt(memoryMatch[1], 10) : 0;
+
+      return {
+        memoryUsage,
+        cacheHits: parseInt(await this.redis.get('stats:hits') || '0', 10),
+        cacheMisses: parseInt(await this.redis.get('stats:misses') || '0', 10),
+        totalKeys,
+      };
+    } catch (error: any) {
+      this.logger.error(`Cache stats error: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async bulkGet<T>(keys: string[]): Promise<(T | null)[]> {
+    try {
+      const namespacedKeys = keys.map((key) => this.getNamespacedKey(key));
+      const values = await this.redis.mget(...namespacedKeys);
+      return values.map((value) => (value ? this.deserialize<T>(value) : null));
+    } catch (error: any) {
+      this.logger.error(`Bulk get error: ${error.message}`);
+      throw error;
+    }
+  }
+}

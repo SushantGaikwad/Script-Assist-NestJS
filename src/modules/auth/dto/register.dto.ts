@@ -34,6 +34,7 @@ export class RegisterDto {
   })
   password: string;
 
+  @ApiProperty({ example: 'USER' })
   @IsOptional()
   @IsEnum(UserRole)
   role: UserRole;

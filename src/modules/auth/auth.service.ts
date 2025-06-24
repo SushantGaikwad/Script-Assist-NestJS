@@ -1,13 +1,13 @@
-import { 
-  Injectable, 
-  UnauthorizedException, 
+import {
+  Injectable,
+  UnauthorizedException,
   BadRequestException,
   Logger,
   Inject,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { Cache } from 'cache-manager';
+import type { Cache } from 'cache-manager';
 import { DataSource } from 'typeorm';
 import { UsersService } from '../users/users.service';
 import { LoginDto } from './dto/login.dto';
@@ -48,7 +48,7 @@ export class AuthService {
     try {
       // Find user with minimal data exposure
       const user = await this.usersService.findByEmail(email);
-      
+
       if (!user) {
         // Constant time operation to prevent timing attacks
         await this.simulatePasswordCheck();
@@ -58,7 +58,7 @@ export class AuthService {
 
       // Constant-time password comparison
       const isPasswordValid = await this.verifyPassword(password, user.password);
-      
+
       if (!isPasswordValid) {
         await this.recordFailedAttempt(email);
         throw new UnauthorizedException('Invalid credentials');
@@ -69,7 +69,7 @@ export class AuthService {
 
       // Generate tokens
       const tokens = await this.generateTokenPair(user);
-      
+
       // Store refresh token
       await this.storeRefreshToken(user.id, tokens.refreshToken, queryRunner);
 
@@ -206,19 +206,14 @@ export class AuthService {
     await this.dataSource.manager.update(
       RefreshToken,
       { userId, isActive: true },
-      { isActive: false }
+      { isActive: false },
     );
 
     this.logger.log(`User ${userId} logged out`);
   }
 
-
   async revokeAllRefreshTokens(userId: string): Promise<void> {
-    await this.dataSource.manager.update(
-      RefreshToken,
-      { userId },
-      { isActive: false }
-    );
+    await this.dataSource.manager.update(RefreshToken, { userId }, { isActive: false });
 
     this.logger.log(`All refresh tokens revoked for user ${userId}`);
   }
@@ -263,7 +258,7 @@ export class AuthService {
         {
           secret: this.configService.get('JWT_REFRESH_SECRET'),
           expiresIn: this.configService.get('JWT_REFRESH_EXPIRATION', '7d'),
-        }
+        },
       ),
     ]);
 
@@ -293,7 +288,7 @@ export class AuthService {
   private async checkUserLockout(email: string): Promise<void> {
     const lockoutKey = `lockout:${email}`;
     const lockoutData = await this.cacheManager.get(lockoutKey);
-    
+
     if (lockoutData) {
       throw new UnauthorizedException('Account temporarily locked due to too many failed attempts');
     }
@@ -301,7 +296,7 @@ export class AuthService {
 
   private async recordFailedAttempt(email: string): Promise<void> {
     const attemptsKey = `attempts:${email}`;
-    const attempts = await this.cacheManager.get<number>(attemptsKey) || 0;
+    const attempts = (await this.cacheManager.get<number>(attemptsKey)) || 0;
     const newAttempts = attempts + 1;
 
     if (newAttempts >= this.MAX_LOGIN_ATTEMPTS) {
